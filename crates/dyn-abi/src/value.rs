@@ -288,12 +288,78 @@ impl DynSolValue {
 
     /// Encodes the value
     pub fn encode(&self) -> Vec<u8> {
+        let quick_encode = self.quick_encode();
+        if quick_encode.is_some() {
+            return quick_encode.unwrap();
+        }
         let head= self.head_bytes();
         // let tail = self.tail_bytes();
         let mut result = Vec::with_capacity((head + 32) as usize);
         let mut tail_pos = head;
         self.encode_to_inner(&mut result, &mut tail_pos);
         result
+    }
+
+    fn quick_encode(&self) -> Option<Vec<u8>> {
+        match self {
+            Self::Address(addr) => {
+                let mut buf = Vec::with_capacity(32);
+                buf.extend_from_slice(&ZEROS[20..]);
+                buf.extend_from_slice(addr.as_slice());
+                Some(buf)
+            }
+            Self::Bool(b) => {
+                let mut buf = Vec::with_capacity(32);
+                buf.extend_from_slice(&ZEROS[1..]);
+                buf.push(*b as u8);
+                Some(buf)
+            }
+            Self::Bytes(bytes) => {
+                let mut buf = Vec::with_capacity(32 + Self::in_words(bytes.len()) as usize);
+                Self::encode_u32(&mut buf, 1);
+                Self::encode_u32(&mut buf, bytes.len() as u32);
+                buf.extend_from_slice(&bytes[..]);
+                if bytes.len() % 32 != 0 {
+                    buf.extend_from_slice(&ZEROS[(bytes.len() % 32)..]);
+                }
+                Some(buf)
+            }
+            Self::String(s) => {
+                let mut buf = Vec::with_capacity(32 + Self::in_words(s.len()) as usize);
+                Self::encode_u32(&mut buf, 1);
+                Self::encode_u32(&mut buf, s.len() as u32);
+                buf.extend_from_slice(s.as_bytes());
+                if s.len() % 32 != 0 {
+                    buf.extend_from_slice(&ZEROS[(s.len() % 32)..]);
+                }
+                Some(buf)
+            }
+            Self::FixedBytes(word, _size) => {
+                let mut buf = Vec::with_capacity(32);
+                buf.extend_from_slice(&word.as_slice());
+                Some(buf)
+            }
+            Self::Int(num, _size) => {
+                let mut buf = Vec::with_capacity(32);
+                let bytes = num.to_be_bytes::<32>();
+                buf.extend_from_slice(&bytes);
+                Some(buf)
+            }
+            Self::Uint(num, _size) => {
+                let mut buf = Vec::with_capacity(32);
+                buf.extend_from_slice(&num.to_be_bytes::<32>().as_slice());
+                Some(buf)
+            }
+            Self::CustomValue { inner, .. } => {
+                let mut buf = Vec::with_capacity(32);
+                buf.extend_from_slice(inner.as_slice());
+                Some(buf)
+            }
+            Self::Array(_)
+            | Self::Tuple(_)
+            | Self::FixedArray(_)
+            | Self::CustomStruct { .. } => None
+        }
     }
 
     fn head_encode_to<'myref, 'me: 'myref>(&'me self, buf: &mut Vec<u8>, tail_pos: &mut u32, tails: &mut VecDeque<&'myref DynSolValue>) {
