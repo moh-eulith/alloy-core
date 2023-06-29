@@ -14,7 +14,7 @@ fn ethabi_encode(c: &mut Criterion) {
         let input = encode_single_input();
         b.iter(|| {
             let token = ethabi::Token::String(black_box(&input).clone());
-            ethabi::encode(&[token])
+            ethabi::encode(black_box(&[token]))
         });
     });
 
@@ -60,6 +60,14 @@ fn dyn_abi_encode(c: &mut Criterion) {
         });
     });
 
+    g.bench_function("single-direct", |b| {
+        let input = encode_single_input();
+        let value = DynSolValue::String((&input).clone());
+        b.iter(|| {
+            value.encode()
+        });
+    });
+
     g.bench_function("struct", |b| {
         let tys = vec![
             DynSolType::Address,
@@ -75,6 +83,12 @@ fn dyn_abi_encode(c: &mut Criterion) {
         let input = encode_struct_sol_values();
         let input = DynSolValue::Tuple(input.to_vec());
         b.iter(|| ty.encode_single(black_box(&input).clone()));
+    });
+
+    g.bench_function("struct-direct", |b| {
+        let input = encode_struct_sol_values();
+        let input = DynSolValue::Tuple(input.to_vec());
+        b.iter(|| input.encode());
     });
 
     g.finish();
@@ -106,8 +120,18 @@ fn sol_types_encode(c: &mut Criterion) {
         b.iter(|| alloy_sol_types::sol_data::String::encode_single(black_box(&input)));
     });
 
+    let input = encode_single_input();
+    g.bench_function("single-direct", |b| {
+        b.iter(|| alloy_sol_types::sol_data::String::encode_single(black_box(&input)));
+    });
+
     g.bench_function("struct", |b| {
         let input = encode_struct_input();
+        b.iter(|| Input::encode(&input));
+    });
+
+    let input = encode_struct_input();
+    g.bench_function("struct-direct", |b| {
         b.iter(|| Input::encode(&input));
     });
 

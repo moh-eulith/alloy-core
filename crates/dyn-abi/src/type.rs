@@ -366,9 +366,9 @@ impl DynSolType {
 
     /// Encode a single value. Fails if the value does not match this type.
     pub fn encode_single(&self, value: DynSolValue) -> Result<Vec<u8>> {
-        let mut encoder = crate::Encoder::default();
-        self.tokenize(value)?.encode_single(&mut encoder)?;
-        Ok(encoder.into_bytes())
+        // let mut encoder = crate::Encoder::default();
+        // self.tokenize(value)?.encode_single(&mut encoder)?;
+        Ok(value.encode())
     }
 
     /// Decode a single value. Fails if the value does not match this type.

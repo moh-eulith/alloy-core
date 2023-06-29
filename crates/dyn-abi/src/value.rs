@@ -1,3 +1,4 @@
+use std::collections::VecDeque;
 use crate::{no_std_prelude::*, Word};
 use alloy_primitives::{Address, I256, U256};
 
@@ -43,6 +44,8 @@ pub enum DynSolValue {
         inner: Word,
     },
 }
+
+static ZEROS: [u8; 32] = [0; 32];
 
 impl DynSolValue {
     /// The Solidity type name.
@@ -211,6 +214,187 @@ impl DynSolValue {
             }
             Self::CustomValue { inner, .. } => buf.extend_from_slice(inner.as_slice()),
         }
+    }
+
+    #[inline]
+    fn in_words(len: usize) -> u32 {
+        ((len as u32) + 31) / 32
+    }
+
+    fn is_dynamic(&self) -> bool {
+        match self {
+            Self::Address(_)
+            | Self::Bool(_)
+            | Self::FixedBytes(_, _)
+            | Self::Int(_, _)
+            | Self::Uint(_, _)
+            | Self::CustomValue { .. } => false,
+            Self::Bytes(_)
+            | Self::String(_)
+            | Self::Array(_) => true,
+            Self::FixedArray(inner) => inner[0].is_dynamic(),
+            Self::CustomStruct{ tuple: inner, .. }
+            | Self::Tuple(inner) => inner.iter().any(Self::is_dynamic),
+        }
+    }
+
+    fn head_bytes(&self) -> u32 {
+        match self {
+            Self::Address(_)
+            | Self::Bool(_)
+            | Self::FixedBytes(_, _)
+            | Self::Int(_, _)
+            | Self::Uint(_, _)
+            | Self::CustomValue { .. }
+            | Self::Bytes(_)
+            | Self::String(_)
+            | Self::Array(_) => 32,
+            Self::FixedArray(inner) => {
+                if inner[0].is_dynamic() {
+                    32
+                } else {
+                    inner.iter().map(|x| x.head_bytes()).sum()
+                }
+            }
+            Self::Tuple(inner)
+            | Self::CustomStruct { tuple: inner, .. } => {
+                inner.iter().map(|x| x.head_bytes()).sum()
+            }
+        }
+    }
+
+    fn tail_bytes(&self) -> u32 {
+        match self {
+            Self::Address(_)
+            | Self::Bool(_)
+            | Self::FixedBytes(_, _)
+            | Self::Int(_, _)
+            | Self::Uint(_, _)
+            | Self::CustomValue { .. } => 0,
+            Self::Bytes(b) => 1 + Self::in_words(b.len()),
+            Self::String(s) => 1 + Self::in_words(s.len()),
+            Self::Array(x) => 1u32 + x.iter().map(Self::tail_bytes).sum::<u32>(),
+            Self::FixedArray(inner) => {
+                if inner[0].is_dynamic() {
+                    inner.iter().map(|x| x.head_bytes() + x.tail_bytes()).sum()
+                } else {
+                    0
+                }
+            }
+            Self::Tuple(inner)
+            | Self::CustomStruct { tuple: inner, .. } => inner.iter().map(Self::tail_bytes).sum::<u32>()
+        }
+    }
+
+    /// Encodes the value
+    pub fn encode(&self) -> Vec<u8> {
+        let head= self.head_bytes();
+        // let tail = self.tail_bytes();
+        let mut result = Vec::with_capacity((head + 32) as usize);
+        let mut tail_pos = head;
+        self.encode_to_inner(&mut result, &mut tail_pos);
+        result
+    }
+
+    fn head_encode_to<'myref, 'me: 'myref>(&'me self, buf: &mut Vec<u8>, tail_pos: &mut u32, tails: &mut VecDeque<&'myref DynSolValue>) {
+        match self {
+            Self::Address(addr) => {
+                buf.extend_from_slice(&ZEROS[20..]);
+                buf.extend_from_slice(addr.as_slice())
+            }
+            Self::Bool(b) => {
+                buf.extend_from_slice(&ZEROS[1..]);
+                buf.push(*b as u8)
+            }
+            Self::Bytes(_bytes) => {
+                Self::encode_tail_pos(buf, tail_pos, self.tail_bytes());
+                tails.push_back(self);
+            }
+            Self:: String(_s) => {
+                Self::encode_tail_pos(buf, tail_pos, self.tail_bytes());
+                tails.push_back(self);
+            }
+            Self:: Array(_) => {
+                Self::encode_tail_pos(buf, tail_pos, self.tail_bytes());
+                tails.push_back(self);
+            }
+            Self::FixedBytes(word, _size) => {
+                buf.extend_from_slice(&word.as_slice())
+            }
+            Self::Int(num, _size) => {
+                let bytes = num.to_be_bytes::<32>();
+                buf.extend_from_slice(&bytes)
+            }
+            Self::Uint(num, _size) => {
+                buf.extend_from_slice(&num.to_be_bytes::<32>().as_slice())
+            }
+            Self::Tuple(inner)
+            | Self::FixedArray(inner)
+            | Self::CustomStruct { tuple: inner, .. } => {
+                inner.iter().for_each(|dv| dv.head_encode_to(buf, tail_pos, tails))
+            }
+            Self::CustomValue { inner, .. } => buf.extend_from_slice(inner.as_slice()),
+        }
+    }
+
+    fn tail_encode_to<'myref, 'me: 'myref>(&'me self, buf: &mut Vec<u8>, tail_pos: &mut u32, tails: &mut VecDeque<&'myref DynSolValue>) {
+        match self {
+            Self::Bytes(bytes) => {
+                Self::encode_u32(buf, bytes.len() as u32);
+                buf.extend_from_slice(&bytes[..]);
+                if bytes.len() % 32 != 0 {
+                    buf.extend_from_slice(&ZEROS[(bytes.len() % 32)..]);
+                }
+            }
+            Self:: String(s) => {
+                Self::encode_u32(buf, s.len() as u32);
+                buf.extend_from_slice(s.as_bytes());
+                if s.len() % 32 != 0 {
+                    buf.extend_from_slice(&ZEROS[(s.len() % 32)..]);
+                }
+            }
+            Self:: Array(inner) => {
+                Self::encode_u32(buf, inner.len() as u32);
+                inner.iter().for_each(|dv| dv.head_encode_to(buf, tail_pos, tails));
+            }
+            Self::Tuple(inner)
+            | Self::FixedArray(inner)
+            | Self::CustomStruct { tuple: inner, .. } => {
+                inner.iter().for_each(|dv| dv.tail_encode_to(buf, tail_pos, tails));
+            }
+            Self::Address(_)
+            | Self::Bool(_)
+            | Self::FixedBytes(_, _)
+            | Self::Int(_, _)
+            | Self::Uint(_, _)
+            | Self::CustomValue { .. } => (), //shouldn't get here
+        }
+    }
+
+    fn encode_to_inner(&self, buf: &mut Vec<u8>, tail_pos: &mut u32) {
+        let mut tails: VecDeque<&DynSolValue> = VecDeque::with_capacity(0);
+        self.head_encode_to(buf, tail_pos, &mut tails);
+        let mut next_tail = tails.pop_front();
+        while next_tail.is_some() {
+            let tail = next_tail.unwrap();
+            tail.tail_encode_to(buf, tail_pos, &mut tails);
+            next_tail = tails.pop_front();
+        }
+    }
+
+    #[inline]
+    fn encode_tail_pos(buf: &mut Vec<u8>, tail_pos: &mut u32, tail_size: u32) {
+        Self::encode_u32(buf, *tail_pos);
+        *tail_pos += tail_size;
+    }
+
+    #[inline]
+    fn encode_u32(buf: &mut Vec<u8>, v: u32) {
+        buf.extend_from_slice(&ZEROS[4..]);
+        buf.push((v >> 24) as u8);
+        buf.push((v >> 16) as u8);
+        buf.push((v >> 8) as u8);
+        buf.push((v) as u8);
     }
 
     /// Encodes the value into a packed byte array.
